@@ -39,8 +39,6 @@ $$KIR = \frac{1}{N} \sum \left\| \Delta x_{pred} - v_{pred} \cdot \Delta t \righ
 
 ## 🖼️ 可视化结果 (Visualization)
 
-这里插入你的仿真对比图：
-
 ![Evaluation Results](figures/phase1_multi_test.png)
 
 ## 📊 训练表现
