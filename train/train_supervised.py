@@ -1,101 +1,98 @@
 import os
 import sys
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import TensorDataset, DataLoader
-from tqdm import tqdm  # 进度条神器
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
 
-# 确保脚本能找到上一级目录的模块
+# 把项目的根目录添加到搜索路径中
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 导入你之前的残差模型
 from models.mlp import DynamicsMLP
 
-def train_phase1():
-    # ==========================================
-    # 1. 超参数设置 (Hyperparameters) - 炼丹的火候
-    # ==========================================
-    BATCH_SIZE = 64        # 每次看 64 道题就总结一次经验（更新一次权重）
-    EPOCHS = 50            # 把这 10000 道题反反复复刷 50 遍
-    LEARNING_RATE = 0.001  # 学习率：每次改错时，步伐迈多大
-
-    # 自动检测是否有显卡 (NVIDIA GPU -> 'cuda', 否则用 'cpu')
+def train_phase1_sequential():
+    # 1. 设备配置
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 当前使用的计算设备: {device}")
+    print(f"🚀 终极时序训练开始，使用设备: {device}")
 
-    # ==========================================
-    # 2. 加载数据 (Data Loading)
-    # ==========================================
-    data_path = os.path.join("data", "phase1_dataset.npz")
+    # 2. 加载轨迹数据 [N, Seq, Dim]
+    data_path = "data/phase1_trajectories.npz"
     if not os.path.exists(data_path):
-        raise FileNotFoundError(f"找不到数据文件 {data_path}，请先运行 generate.py")
-        
+        print("❌ 找不到轨迹数据，请先运行 generate.py")
+        return
+
     data = np.load(data_path)
-    # 将 Numpy 数组转换为 PyTorch 认识的 Tensor，并搬运到 GPU/CPU 上
-    X_tensor = torch.tensor(data['X'], dtype=torch.float32).to(device)
-    Y_tensor = torch.tensor(data['Y'], dtype=torch.float32).to(device)
+    X_raw = torch.from_numpy(data['X']).float() # [N, 15, 6]
+    Y_raw = torch.from_numpy(data['Y']).float() # [N, 15, 4]
+
+    dataset = TensorDataset(X_raw, Y_raw)
+    dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
+
+    # 3. 初始化模型与优化器
+    model = DynamicsMLP(input_dim=6, output_dim=4).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
     
-    # 使用 TensorDataset 和 DataLoader 将数据打包成批次 (Batches)
-    dataset = TensorDataset(X_tensor, Y_tensor)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-    
-    # ==========================================
-    # 3. 初始化模型、损失函数和优化器
-    # ==========================================
-    # Phase 1: 输入 6 维 [x, y, vx, vy, fx, fy]，输出 4 维 [x', y', vx', vy']
-    model = DynamicsMLP(input_dim=6, output_dim=4, hidden_dim=64).to(device)
-    
-    # 损失函数：均方误差 MSE (Mean Squared Error) —— 专门用来做数值预测
+    # 【架构升级】：加装自适应学习率变速箱
+    # 如果连续 5 个 epoch Loss 降不下去，就把学习率砍半，进行精细微调
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)    
+
     criterion = nn.MSELoss()
-    
-    # 优化器：Adam (目前最主流的自适应优化算法，负责帮你调整模型里的参数)
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    
-    # ==========================================
-    # 4. 正式开始训练循环 (Training Loop)
-    # ==========================================
-    print(f"\n🔥 开始训练 Phase 1 模型...")
-    
-    for epoch in range(EPOCHS):
-        model.train() # 将模型设置为训练模式
-        epoch_loss = 0.0
+
+    num_epochs = 100 # 难度变大，适当增加 epoch 数量
+    seq_length = X_raw.shape[1] 
+    print(f"📏 检测到轨迹步长 (Sequence Length): {seq_length} 步")
+
+    for epoch in range(num_epochs):
+        model.train()
+        epoch_loss = 0
         
-        # tqdm 包装 dataloader，生成一个漂亮的进度条
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{EPOCHS}", leave=False)
-        
-        for batch_X, batch_Y in progress_bar:
-            # 步骤 A：清空上一次的梯度（避免前一次的经验干扰这一次）
+        for batch_X, batch_Y in dataloader:
+            batch_X, batch_Y = batch_X.to(device), batch_Y.to(device)
             optimizer.zero_grad()
             
-            # 步骤 B：前向传播 (Forward Pass) -> 让模型做题
-            predictions = model(batch_X)
+            # --- 核心：多步自回归推演 ---
+            step_losses = 0
+            current_input = batch_X[:, 0, :] 
             
-            # 步骤 C：计算误差 (Compute Loss) -> 老师用红笔批改
-            loss = criterion(predictions, batch_Y)
+            for t in range(seq_length):
+                # 1. 模型预测下一步
+                pred_next_state = model(current_input)
+                
+                # 2. 计算损失累加
+                target_next_state = batch_Y[:, t, :]
+                step_losses += criterion(pred_next_state, target_next_state)
+                
+                # 3. 构造下一步的输入：使用预测值 + 下一帧真实的动态受力
+                if t < seq_length - 1:
+                    next_force = batch_X[:, t+1, 4:] 
+                    current_input = torch.cat([pred_next_state, next_force], dim=1)
             
-            # 步骤 D：反向传播 (Backward Pass) -> 找出是哪个脑细胞算错了
-            loss.backward()
+            # 4. 穿透时间的梯度反向传播
+            total_loss = step_losses / seq_length
+            total_loss.backward()
             
-            # 步骤 E：更新权重 (Update Weights) -> 纠正脑细胞
+            # 梯度裁剪，防爆盾
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
-            
-            epoch_loss += loss.item()
-            # 实时更新进度条上的 Loss 显示
-            progress_bar.set_postfix({'loss': f"{loss.item():.4f}"})
-            
-        # 每一个 Epoch 结束后，打印一下平均误差
-        avg_loss = epoch_loss / len(dataloader)
-        print(f"Epoch {epoch+1}/{EPOCHS} | Average Loss: {avg_loss:.6f}")
+            epoch_loss += total_loss.item()
+
+        avg_epoch_loss = epoch_loss / len(dataloader)
+        # 获取当前优化器的实时学习率
+        current_lr = optimizer.param_groups[0]['lr'] 
         
-    # ==========================================
-    # 5. 保存训练好的模型
-    # ==========================================
+        # 把学习率也打印出来
+        print(f"Epoch {epoch+1:02d}/{num_epochs} | Average Sequential Loss: {avg_epoch_loss:.6f} | LR: {current_lr:.6f}")
+        # 让变速箱根据当前 Epoch 的平均 Loss 决定是否要降低学习率
+        scheduler.step(avg_epoch_loss)
+
+    # 5. 保存模型
     os.makedirs("models", exist_ok=True)
-    save_path = os.path.join("models", "phase1_model.pth")
-    # 只保存模型的参数权重（state_dict），这是 PyTorch 的官方推荐做法
-    torch.save(model.state_dict(), save_path)
-    print(f"\n🎉 训练完成！模型权重已保存至: {save_path}")
+    torch.save(model.state_dict(), "models/phase1_model.pth")
+    print("🎉 终极时序回归模型训练完成并已保存！")
 
 if __name__ == "__main__":
-    train_phase1()
+    train_phase1_sequential()

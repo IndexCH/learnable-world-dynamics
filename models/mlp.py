@@ -3,52 +3,58 @@ import torch.nn as nn
 
 class DynamicsMLP(nn.Module):
     """
-    学习物理动力学的核心神经网络。
-    使用带残差连接 (Residual Connection) 的多层感知机。
+    Phase 1 终极完美版：嵌入辛欧拉积分器 (Symplectic Euler Integrator)
+    网络只负责学习未知的动力学规律 (加速度)，运动学 (位移) 交给硬编码的物理公式。
     """
-    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 64):
+    def __init__(self, input_dim: int = 6, output_dim: int = 4, hidden_dim: int = 64):
         super(DynamicsMLP, self).__init__()
         
-        effective_input_dim = input_dim - 2
+        # ⚠️ 架构大瘦身：
+        # 核心网络只接收 [vx, vy, fx, fy] 4个维度
+        # 并且只输出 [dvx, dvy] 2个维度
         self.network = nn.Sequential(
-            nn.Linear(effective_input_dim, hidden_dim),
+            nn.Linear(4, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim)
-            # 注意：这里的网络输出的不再是绝对状态，而是变化量 (Delta)
+            # 终极改动：只预测速度的变化量 (即加速度的影响)
+            nn.Linear(hidden_dim, 2) 
         )
+        
+        # 物理世界的时间步长 (必须和 TeacherWorld 保持一致)
+        self.dt = 1.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        前向传播：融合了先验常识的残差结构。
+        前向传播：神经网络(动力学) + 硬编码积分器(运动学)
         """
-        # x 的维度是 [batch_size, 6]，依次是 [x, y, vx, vy, fx, fy]
+        # 1. 拆解输入 x: [batch_size, 6] -> [pos_x, pos_y, vel_x, vel_y, fx, fy]
+        pos = x[:, 0:2]
+        vel = x[:, 2:4]
+        force = x[:, 4:6]
         
-        # 提取出当前的状态特征 [x, y, vx, vy]（取前 4 列）
-        current_state = x[:, :4]
+        # 2. 剥离绝对坐标，只把速度和受力喂给神经网络
+        kinematic_features = torch.cat([vel, force], dim=1)
         
-        # 从索引 2 开始切，只保留 [vx, vy, fx, fy]
-        kinematic_features = x[:, 2:]
-        # 让黑盒网络去思考物理规律，算出一个纯粹的变化量 (Delta)
-        # 让黑盒只根据速度和力去算变化量
-        delta = self.network(kinematic_features)
+        # 3. 网络只负责一件事：预测速度的变化量 (Delta Velocity)
+        delta_vel = self.network(kinematic_features)
         
-        # 3. 【核心魔法】：跳跃连接 (Skip Connection)
-        # 将变化量与原状态相加，作为最终输出。
-        # 这一步不是外部硬编码，而是计算图的一部分，可以完美反向传播！
-        next_state = current_state + delta
+        # 4. 【核心物理硬约束】：辛欧拉积分
+        # 这部分是绝对精确的数学定义，没有任何参数，不需要学习，也没有误差！
+        new_vel = vel + delta_vel
+        new_pos = pos + new_vel * self.dt 
+        
+        # 5. 重新拼装成 [x', y', vx', vy'] 吐出去给外面的时序训练循环
+        next_state = torch.cat([new_pos, new_vel], dim=1)
         
         return next_state
 
 if __name__ == "__main__":
-    model = DynamicsMLP(input_dim=6, output_dim=4)
-    print("✅ 残差网络结构已成功构建!")
+    model = DynamicsMLP()
+    print("✅ 终极可微积分器网络已构建!")
     
     dummy_input = torch.tensor([[1000.0, 500.0, 1.0, 0.0, 10.0, 0.0]], dtype=torch.float32)
     dummy_output = model(dummy_input)
     
-    # 你会发现，即便在模型未经训练（MLP 输出接近 0）的情况下，
-    # 它的初始猜测也会非常接近 1000.0 和 500.0，这就极大降低了学习难度！
-    print(f"✅ 输入状态: {dummy_input[:, :4].detach().numpy()}")
-    print(f"✅ 未训练时的输出猜测: {dummy_output.detach().numpy()}")
+    print(f"✅ 输入状态: {dummy_input.detach().numpy()}")
+    print(f"✅ 严格符合运动学的输出: {dummy_output.detach().numpy()}")
