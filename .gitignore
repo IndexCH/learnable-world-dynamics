@@ -10,10 +10,10 @@ __pycache__/
 data/*.pt
 data/*.csv
 data/*.json
-models/*.pth
-models/*.pt
 data/*.pth
 data/*.npz
+models/*.pth
+models/*.pt
 
 # OS generated files
 .DS_Store
