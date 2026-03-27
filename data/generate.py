@@ -31,10 +31,11 @@ def generate_phase1_data(num_samples: int = 10000, output_dir: str = "data"):
     
     for _ in range(num_samples):
         # 3. 随机生成一个初始状态 (位置在 -100 到 100 之间，初始速度在 -10 到 10 之间)
-        x = np.random.uniform(-100.0, 100.0)
-        y = np.random.uniform(-100.0, 100.0)
-        vx = np.random.uniform(-10.0, 10.0)
-        vy = np.random.uniform(-10.0, 10.0)
+        x = np.random.uniform(-1000.0, 100.0)
+        y = np.random.uniform(-1000.0, 100.0)
+        # 【修改这里】：把速度范围扩大，包容我们 Rollout 测试时可能达到的极限速度
+        vx = np.random.uniform(-200.0, 200.0) 
+        vy = np.random.uniform(-200.0, 200.0)
         
         state = RigidBodyState(position=Vector2(x, y), velocity=Vector2(vx, vy))
         
